@@ -66,7 +66,48 @@ COLORS = {
 }
 
 # ---------- TARGET TFT ----------
-TARGET_W, TARGET_H = 480, 320  # resolución de la TFT
+TARGET_W, TARGET_H = 480, 320  # Resolución de tu TFT
+TFT_ROTATE = 0  # 0, 90, 180, 270 (optativo por si tu panel sale girado)
+
+# ---------- HELPERS DE PANTALLA COMPLETA ----------
+def rotate_if_needed(img):
+    if TFT_ROTATE == 90:
+        return cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    if TFT_ROTATE == 180:
+        return cv2.rotate(img, cv2.ROTATE_180)
+    if TFT_ROTATE == 270:
+        return cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return img
+
+def to_tft_fit(img):
+    """Encaja completo en 480x320 conservando aspecto (puede dejar barras)."""
+    img = rotate_if_needed(img)
+    h, w = img.shape[:2]
+    scale = min(TARGET_W / w, TARGET_H / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    canvas = np.zeros((TARGET_H, TARGET_W, 3), dtype=np.uint8)
+    x0 = (TARGET_W - new_w) // 2
+    y0 = (TARGET_H - new_h) // 2
+    canvas[y0:y0+new_h, x0:x0+new_w] = resized
+    return canvas
+
+def to_tft_fill(img):
+    """Rellena toda la pantalla 480x320 (recorta bordes si hace falta)."""
+    img = rotate_if_needed(img)
+    h, w = img.shape[:2]
+    scale = max(TARGET_W / w, TARGET_H / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    x0 = (new_w - TARGET_W) // 2
+    y0 = (new_h - TARGET_H) // 2
+    return resized[y0:y0+TARGET_H, x0:x0+TARGET_W]
+
+def show_fullscreen_init(window_name="Reciclaje Inteligente"):
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.moveWindow(window_name, 0, 0)
+    return window_name
 
 # ---------- CLASE PARTICULA ----------
 class Particle:
@@ -240,10 +281,8 @@ def loop_yolo():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    # Ventana fullscreen y resize a TFT
-    window_name = "Reciclaje Inteligente"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    # Ventana fullscreen para la TFT
+    window_name = show_fullscreen_init("Reciclaje Inteligente")
 
     prev = time.time()
     deteccion_activa = None
@@ -273,12 +312,14 @@ def loop_yolo():
                             x1,y1,x2,y2 = map(int, box.xyxy[0])
                             detection_boxes.append((x1,y1,x2,y2,class_name))
 
+                # cajas con pulso
                 for x1,y1,x2,y2,class_name in detection_boxes:
                     color = COLORS.get(class_name, COLORS['primary'])
                     pulse = (math.sin(animation_time*3)+1)/2
                     thickness = int(2 + pulse*2)
                     cv2.rectangle(annotated, (x1,y1), (x2,y2), color, thickness)
 
+                # lógica de bloqueo
                 if clase_detectada:
                     if deteccion_activa==clase_detectada:
                         if time.time()-inicio_deteccion>=5:
@@ -294,8 +335,9 @@ def loop_yolo():
                     deteccion_activa=None
                     inicio_deteccion=None
 
+                # HUD
                 now=time.time()
-                fps=1/(now-prev)
+                fps=max(1e-6, 1/(now-prev))
                 prev=now
                 cv2.rectangle(annotated,(0,0),(640,80),(0,0,0,180),-1)
                 draw_floating_text(annotated,f"FPS: {fps:.1f}",20,30,0.7,COLORS['accent'])
@@ -310,10 +352,12 @@ def loop_yolo():
                 draw_animated_border(annotated)
                 update_particles(annotated)
 
-                # ---- ESCALADO A 480x320 ANTES DE MOSTRAR ----
-                display = cv2.resize(annotated, (TARGET_W, TARGET_H), interpolation=cv2.INTER_AREA)
+                # ---- ESCALADO A PANTALLA COMPLETA (FILL) ----
+                display = to_tft_fill(annotated)   # usa to_tft_fit(...) si prefieres barras
                 cv2.imshow(window_name, display)
+
             else:
+                # UI de espera/proceso (base 480x640; luego lo adaptamos a la TFT)
                 pantalla = create_gradient_background(480,640,COLORS['dark'],(20,20,40))
                 if mostrando_procesando:
                     draw_floating_text(pantalla,"PROCESANDO",200,150,1.5,COLORS['accent'])
@@ -342,8 +386,8 @@ def loop_yolo():
                 draw_animated_border(pantalla,4,COLORS['accent'])
                 update_particles(pantalla)
 
-                # ---- ESCALADO A 480x320 ANTES DE MOSTRAR ----
-                display = cv2.resize(pantalla, (TARGET_W, TARGET_H), interpolation=cv2.INTER_AREA)
+                # ---- ESCALADO A PANTALLA COMPLETA (FILL) ----
+                display = to_tft_fill(pantalla)    # usa to_tft_fit(...) si prefieres barras
                 cv2.imshow(window_name, display)
 
         if cv2.waitKey(1) & 0xFF==ord('q'):
