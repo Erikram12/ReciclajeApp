@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import ssl
 import time
@@ -13,6 +14,8 @@ import firebase_admin
 from firebase_admin import credentials, db
 import threading
 import math
+import signal
+import sys
 
 # ---------- CONFIG MQTT ----------
 MQTT_BROKER = os.getenv("MQTT_BROKER", "2e139bb9a6c5438b89c85c91b8cbd53f.s1.eu.hivemq.cloud")
@@ -20,7 +23,7 @@ MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
 MQTT_USER = os.getenv("MQTT_USER", "ramsi")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "Erikram2025")
 MQTT_MATERIAL_TOPIC = os.getenv("MQTT_MATERIAL_TOPIC", "material/detectado")
-MQTT_NIVEL_TOPIC = "reciclaje/esp32-01/nivel"  # Tópico donde llegan los datos de nivel
+MQTT_NIVEL_TOPIC = "reciclaje/esp32-01/nivel"
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
@@ -40,7 +43,7 @@ contenedor_ref = db.reference('contenedor')
 GET_UID_APDU = [0xFF, 0xCA, 0x00, 0x00, 0x00]
 
 # ---------- ESTADO GLOBAL ----------
-material_detectado = None  # "plastico" o "aluminio"
+material_detectado = None
 lock = threading.Lock()
 
 # ---------- VARIABLES PARA ANIMACIONES ----------
@@ -49,18 +52,21 @@ pulse_alpha = 0
 wave_radius = 0
 particle_system = []
 
+# ---------- TARGET TFT ----------
+TARGET_W, TARGET_H = 480, 320
+
 # ---------- COLORES Y ESTILOS ----------
 COLORS = {
-    'primary': (0, 188, 212),  # Cyan
-    'secondary': (76, 175, 80),  # Green
-    'accent': (255, 193, 7),  # Amber
-    'success': (76, 175, 80),  # Green
-    'warning': (255, 152, 0),  # Orange
-    'error': (244, 67, 54),  # Red
+    'primary': (0, 188, 212),
+    'secondary': (76, 175, 80),
+    'accent': (255, 193, 7),
+    'success': (76, 175, 80),
+    'warning': (255, 152, 0),
+    'error': (244, 67, 54),
     'white': (255, 255, 255),
     'dark': (33, 33, 33),
-    'plastico': (33, 150, 243),  # Blue
-    'aluminio': (158, 158, 158)  # Grey
+    'plastico': (33, 150, 243),
+    'aluminio': (158, 158, 158)
 }
 
 # ---------- CLASE PARTICULA ----------
@@ -78,7 +84,7 @@ class Particle:
         self.x += self.vx
         self.y += self.vy
         self.life -= 0.02
-        self.vy += 0.1  # gravedad
+        self.vy += 0.1
         return self.life > 0
 
     def draw(self, frame):
@@ -103,7 +109,6 @@ def draw_animated_border(frame, thickness=3, color=(0, 188, 212)):
     alpha = (math.sin(time_factor) + 1) / 2
     border_color = tuple(int(c * (0.5 + alpha * 0.5)) for c in color)
 
-    # Esquinas
     cv2.line(frame, (0, 0), (corner_length, 0), border_color, thickness)
     cv2.line(frame, (0, 0), (0, corner_length), border_color, thickness)
     cv2.line(frame, (w - corner_length, 0), (w, 0), border_color, thickness)
@@ -164,17 +169,14 @@ def update_particles(frame):
 
 # ---------- MQTT CALLBACKS ----------
 def on_mqtt_connect(client, userdata, connect_flags, reason_code, properties):
-    """Callback cuando se conecta al broker MQTT"""
     if reason_code == 0:
         print("[MQTT] ✅ Conectado al broker")
-        # Suscribirse a los tópicos de nivel de contenedores
         client.subscribe(MQTT_NIVEL_TOPIC, qos=1)
         print(f"[MQTT] 📥 Suscrito a: {MQTT_NIVEL_TOPIC}")
     else:
         print(f"[MQTT] ❌ Error de conexión: {reason_code}")
 
 def on_mqtt_message(client, userdata, msg):
-    """Callback cuando llega un mensaje MQTT"""
     try:
         payload = msg.payload.decode('utf-8')
         topic = msg.topic
@@ -182,10 +184,8 @@ def on_mqtt_message(client, userdata, msg):
         print(f"[MQTT] 📨 Mensaje recibido en {topic}")
         print(f"[MQTT] 📄 Payload: {payload}")
         
-        # Parsear el JSON
         data = json.loads(payload)
         
-        # Verificar que sea un mensaje de nivel de contenedor
         if topic == MQTT_NIVEL_TOPIC:
             handle_nivel_update(data)
         
@@ -195,10 +195,8 @@ def on_mqtt_message(client, userdata, msg):
         print(f"[MQTT] ❌ Error procesando mensaje: {e}")
 
 def handle_nivel_update(data):
-    """Procesa la actualización de nivel de contenedor y la guarda en Firebase"""
     try:
-        # Extraer información del mensaje
-        target = data.get('target')  # "contePlastico" o "conteAluminio"
+        target = data.get('target')
         device_id = data.get('deviceId')
         distance_cm = data.get('distance_cm')
         percent = data.get('percent')
@@ -209,17 +207,15 @@ def handle_nivel_update(data):
             print("[Firebase] ❌ Campo 'target' no encontrado")
             return
         
-        # Preparar datos para Firebase
         firebase_data = {
             'deviceId': device_id,
             'distance_cm': round(distance_cm, 3) if distance_cm else 0,
             'estado': state,
             'porcentaje': percent,
             'timestamp': ts,
-            'updatedAt': int(time.time() * 1000)  # Timestamp actual en milisegundos
+            'updatedAt': int(time.time() * 1000)
         }
         
-        # Actualizar Firebase en la ruta contenedor/<target>
         contenedor_ref.child(target).update(firebase_data)
         
         print(f"[Firebase] ✅ Actualizado: contenedor/{target}")
@@ -229,7 +225,6 @@ def handle_nivel_update(data):
         print(f"[Firebase] ❌ Error guardando datos: {e}")
 
 def setup_mqtt():
-    """Configura y conecta el cliente MQTT"""
     client.on_connect = on_mqtt_connect
     client.on_message = on_mqtt_message
     
@@ -303,14 +298,19 @@ def loop_yolo():
     if not weights.exists():
         raise FileNotFoundError(f"No se encontró {weights.resolve()}")
     
-    model = YOLO(str(weights), task="detect")  # task agregado para eliminar warning
+    model = YOLO(str(weights), task="detect")
 
-    cap = cv2.VideoCapture(0)  # Linux / Raspberry Pi
+    cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("No se pudo abrir la cámara. Verifica conexión y permisos.")
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    window_name = "Reciclaje Inteligente"
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
     prev = time.time()
     deteccion_activa = None
     inicio_deteccion = None
@@ -322,7 +322,7 @@ def loop_yolo():
         if not ret:
             break
         animation_time = time.time()
-        overlay = frame.copy()
+
         with lock:
             if material_detectado is None:
                 results = model.predict(frame, conf=0.5, imgsz=320, verbose=False)
@@ -339,14 +339,12 @@ def loop_yolo():
                             x1,y1,x2,y2 = map(int, box.xyxy[0])
                             detection_boxes.append((x1,y1,x2,y2,class_name))
 
-                # Dibujar cajas
                 for x1,y1,x2,y2,class_name in detection_boxes:
                     color = COLORS.get(class_name, COLORS['primary'])
                     pulse = (math.sin(animation_time*3)+1)/2
                     thickness = int(2 + pulse*2)
                     cv2.rectangle(annotated, (x1,y1), (x2,y2), color, thickness)
 
-                # temporizador detección
                 if clase_detectada:
                     if deteccion_activa==clase_detectada:
                         if time.time()-inicio_deteccion>=5:
@@ -362,7 +360,6 @@ def loop_yolo():
                     deteccion_activa=None
                     inicio_deteccion=None
 
-                # FPS
                 now=time.time()
                 fps=1/(now-prev)
                 prev=now
@@ -378,7 +375,9 @@ def loop_yolo():
 
                 draw_animated_border(annotated)
                 update_particles(annotated)
-                cv2.imshow("Reciclaje Inteligente", annotated)
+
+                display = cv2.resize(annotated, (TARGET_W, TARGET_H), interpolation=cv2.INTER_AREA)
+                cv2.imshow(window_name, display)
             else:
                 pantalla = create_gradient_background(480,640,COLORS['dark'],(20,20,40))
                 if mostrando_procesando:
@@ -406,7 +405,9 @@ def loop_yolo():
                             cv2.circle(pantalla,(320,240),r+wave_radius,color,2)
                 draw_animated_border(pantalla,4,COLORS['accent'])
                 update_particles(pantalla)
-                cv2.imshow("Reciclaje Inteligente", pantalla)
+
+                display = cv2.resize(pantalla, (TARGET_W, TARGET_H), interpolation=cv2.INTER_AREA)
+                cv2.imshow(window_name, display)
 
         if cv2.waitKey(1) & 0xFF==ord('q'):
             break
@@ -414,11 +415,16 @@ def loop_yolo():
     cap.release()
     cv2.destroyAllWindows()
 
+def handle_sigterm(signum, frame):
+    try:
+        cv2.destroyAllWindows()
+    except:
+        pass
+    sys.exit(0)
+
 # ---------- MAIN ----------
 if __name__=="__main__":
-    # Configurar MQTT
+    signal.signal(signal.SIGTERM, handle_sigterm)
     setup_mqtt()
-    
-    # Iniciar threads
     threading.Thread(target=loop_nfc, daemon=True).start()
     loop_yolo()
